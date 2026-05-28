@@ -40,14 +40,15 @@ class DaqTab(QWidget):
         file_layout = QGridLayout()
         
         file_layout.addWidget(QLabel("Config (.conf):"), 0, 0)
-        self.config_input = QLineEdit()
+        # 🌟 수정: 과거 하드코딩 잔재(../) 제거
+        self.config_input = QLineEdit("config/dt5751_inorganic_master.conf")
         file_layout.addWidget(self.config_input, 0, 1)
         self.btn_browse_config = QPushButton("Browse")
         self.btn_browse_config.clicked.connect(self.browse_config)
         file_layout.addWidget(self.btn_browse_config, 0, 2)
 
         file_layout.addWidget(QLabel("Output (.dat):"), 1, 0)
-        self.output_input = QLineEdit()
+        self.output_input = QLineEdit("../data/data_run.dat")
         file_layout.addWidget(self.output_input, 1, 1)
         self.btn_browse_output = QPushButton("Browse")
         self.btn_browse_output.clicked.connect(self.browse_output)
@@ -155,7 +156,8 @@ class DaqTab(QWidget):
         layout.addWidget(self.terminal)
 
     def load_settings(self):
-        saved_config = self.settings.value("last_config", "")
+        # 🌟 수정: 디폴트 세팅도 CMake Out-Of-Source 배포 경로 적용
+        saved_config = self.settings.value("last_config", "config/dt5751_inorganic_master.conf")
         self.config_input.setText(saved_config)
         self.output_input.setText(self.settings.value("last_output", "../data/data_run.dat"))
         self.spin_events.setValue(int(self.settings.value("last_events", 0)))
@@ -172,8 +174,9 @@ class DaqTab(QWidget):
     def parse_env_from_config(self, filepath):
         """설정 파일에서 [Environment] 섹션을 파싱하여 UI에 동기화합니다."""
         full_path = filepath
-        if filepath.startswith("config/"): full_path = os.path.join(self.bin_dir, "..", filepath)
-        elif not os.path.isabs(filepath): full_path = os.path.abspath(os.path.join(self.bin_dir, filepath))
+        # 🌟 수정: 하드코딩된 ../ 삽입 로직 완벽 제거
+        if not os.path.isabs(filepath): 
+            full_path = os.path.abspath(os.path.join(self.bin_dir, filepath))
 
         if not os.path.exists(full_path): return
 
@@ -196,7 +199,9 @@ class DaqTab(QWidget):
         self.set_scan_enabled(idx == 2)
 
     def browse_config(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select Config File", self.bin_dir, "Config Files (*.conf *.ini);;All Files (*)")
+        # 🌟 수정: 탐색기 시작 위치를 올바른 폴더로 지정
+        default_dir = os.path.abspath(os.path.join(self.bin_dir, "config"))
+        path, _ = QFileDialog.getOpenFileName(self, "Select Config File", default_dir, "Config Files (*.conf *.ini);;All Files (*)")
         if path: 
             rel_path = os.path.relpath(path, self.bin_dir)
             self.config_input.setText(rel_path)
@@ -266,8 +271,8 @@ class DaqTab(QWidget):
         output_file = self.base_output_path
         name, ext = os.path.splitext(self.base_output_path)
         
+        # 🌟 수정: 악성 하드코딩 제거
         config_path_str = self.config_input.text()
-        if config_path_str.startswith("config/"): config_path_str = "../" + config_path_str
         config_full = os.path.abspath(os.path.join(self.bin_dir, config_path_str))
 
         mode = self.combo_mode.currentIndex()
