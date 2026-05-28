@@ -9,9 +9,18 @@ from core.DatabaseManager import DatabaseManager
 class ProductionTab(QWidget):
     def __init__(self):
         super().__init__()
+        
+        curr = os.path.abspath(os.path.dirname(__file__))
+        while curr != '/' and not os.path.exists(os.path.join(curr, 'CMakeLists.txt')):
+            curr = os.path.dirname(curr)
+        self.proj_dir = curr if curr != '/' else os.getcwd()
+        
+        self.bin_dir = os.path.join(self.proj_dir, "build", "bin")
+        self.data_dir = os.path.join(self.proj_dir, "data")
+        os.makedirs(self.data_dir, exist_ok=True)
+        
         self.settings = QSettings("CPNR", "DT5751_ProductionTab")
-        self.bin_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-        self.db = DatabaseManager(os.path.join(self.bin_dir, "data", "run_history.db"))
+        self.db = DatabaseManager(os.path.join(self.data_dir, "run_history.db"))
         
         self.process = QProcess()
         self.process.readyReadStandardOutput.connect(self.handle_stdout)
@@ -50,16 +59,29 @@ class ProductionTab(QWidget):
         io_group.setLayout(io_layout)
         layout.addWidget(io_group)
 
+        # 🌟 디버그 모드 진입 분기점 UI 추가
         opt_group = QGroupBox("Conversion Options & Time-Machine Debugger")
         opt_layout = QHBoxLayout()
+        
         self.chk_save_waveforms = QCheckBox("Save Waveforms (-w)")
         self.chk_save_waveforms.setStyleSheet("font-weight: bold;")
+        
+        self.chk_debug_mode = QCheckBox("Interactive Debug Mode (-d)")
+        self.chk_debug_mode.setStyleSheet("font-weight: bold; color: #d9534f;")
+        self.chk_debug_mode.stateChanged.connect(self.toggle_debug_ui)
+        
+        self.spin_debug_start = QSpinBox()
+        self.spin_debug_start.setRange(0, 9999999)
+        self.spin_debug_start.setPrefix("Start Evt ID: ")
+        self.spin_debug_start.setEnabled(False) # 초기 비활성화
+
         self.btn_run = QPushButton("Run ROOT Conversion")
         self.btn_run.setStyleSheet("background-color: #5bc0de; color: white; font-weight: bold; padding: 8px;")
         self.btn_run.clicked.connect(self.run_conversion)
         self.btn_stop = QPushButton("Force Stop")
         self.btn_stop.setStyleSheet("background-color: #d9534f; color: white; font-weight: bold; padding: 8px;")
         self.btn_stop.clicked.connect(self.stop_all)
+        
         self.btn_prev = QPushButton("Prev (p)")
         self.btn_next = QPushButton("Next (n)")
         self.btn_jump = QPushButton("Jump (j)")
@@ -73,6 +95,9 @@ class ProductionTab(QWidget):
         self.btn_quit.clicked.connect(lambda: self.send_debug_command("q\n"))
 
         opt_layout.addWidget(self.chk_save_waveforms)
+        opt_layout.addWidget(self.chk_debug_mode)
+        opt_layout.addWidget(self.spin_debug_start)
+        opt_layout.addSpacing(10)
         opt_layout.addWidget(self.btn_run)
         opt_layout.addWidget(self.btn_stop)
         opt_layout.addSpacing(20)
@@ -109,6 +134,19 @@ class ProductionTab(QWidget):
         layout.addWidget(self.log_console)
 
         self.setLayout(layout)
+        self.set_debug_controls_enabled(False) # 안전장치: 최초에 통신 버튼 모두 차단
+
+    def toggle_debug_ui(self, state):
+        # 디버그 모드 체크 시 시작 ID 스핀박스 활성화
+        self.spin_debug_start.setEnabled(state == Qt.Checked)
+
+    def set_debug_controls_enabled(self, enabled):
+        # 통신 혼선 방지를 위해 프로세스 동작 상태와 연동
+        self.btn_prev.setEnabled(enabled)
+        self.btn_next.setEnabled(enabled)
+        self.spin_jump.setEnabled(enabled)
+        self.btn_jump.setEnabled(enabled)
+        self.btn_quit.setEnabled(enabled)
 
     def load_settings(self):
         self.input_edit.setText(self.settings.value("last_prod_input", ""))
@@ -121,17 +159,17 @@ class ProductionTab(QWidget):
         self.settings.setValue("last_save_wave", self.chk_save_waveforms.isChecked())
 
     def browse_input(self):
-        last_dir = os.path.dirname(self.input_edit.text()) if self.input_edit.text() else os.path.join(self.bin_dir, "../data")
+        last_dir = os.path.dirname(os.path.join(self.proj_dir, self.input_edit.text())) if self.input_edit.text() else self.data_dir
         fname, _ = QFileDialog.getOpenFileName(self, "Open Raw Data", last_dir, "Data Files (*.dat)")
         if fname: 
-            self.input_edit.setText(os.path.relpath(fname, self.bin_dir))
+            self.input_edit.setText(os.path.relpath(fname, self.proj_dir))
             self.save_settings()
 
     def browse_output(self):
-        last_dir = os.path.dirname(self.output_edit.text()) if self.output_edit.text() else os.path.join(self.bin_dir, "../data")
+        last_dir = os.path.dirname(os.path.join(self.proj_dir, self.output_edit.text())) if self.output_edit.text() else self.data_dir
         fname, _ = QFileDialog.getSaveFileName(self, "Save ROOT Data", last_dir, "ROOT Files (*.root)")
         if fname: 
-            self.output_edit.setText(os.path.relpath(fname, self.bin_dir))
+            self.output_edit.setText(os.path.relpath(fname, self.proj_dir))
             self.save_settings()
 
     def run_conversion(self):
@@ -143,9 +181,18 @@ class ProductionTab(QWidget):
             self.log_console.append("<span style='color:red;'>[Error] Please select input file!</span>")
             return
             
+        if out_file:
+            out_file_full = os.path.abspath(os.path.join(self.proj_dir, out_file))
+            os.makedirs(os.path.dirname(out_file_full), exist_ok=True)
+            
         args = ["-i", self.current_raw_file]
         if out_file: args.extend(["-o", out_file])
         if self.chk_save_waveforms.isChecked(): args.append("-w")
+        
+        # 🌟 C++ 프로세스에 명시적으로 디버그(-d) 명령 전달
+        is_debug_mode = self.chk_debug_mode.isChecked()
+        if is_debug_mode:
+            args.extend(["-d", str(self.spin_debug_start.value())])
             
         self.progress_bar.setValue(0)
         self.lbl_events.setText("Events: 0")
@@ -160,7 +207,13 @@ class ProductionTab(QWidget):
             return
 
         self.btn_run.setEnabled(False)
+        
+        # 🌟 디버그 모드일 때만 인터랙티브 버튼 활성화
+        self.set_debug_controls_enabled(is_debug_mode)
+        
         self.log_console.append(f"<b>[System] Starting:</b> {exe_path} {' '.join(args)}")
+        
+        self.process.setWorkingDirectory(self.proj_dir)
         self.process.start(exe_path, args)
 
     def stop_all(self):
@@ -170,6 +223,7 @@ class ProductionTab(QWidget):
             if self.process.state() == QProcess.Running: self.process.kill()
             self.log_console.append("<span style='color:red;'>[System] Conversion forcefully stopped.</span>")
             self.btn_run.setEnabled(True)
+            self.set_debug_controls_enabled(False) # 🌟 강제 종료 시 버튼 비활성화
 
     def send_debug_command(self, cmd_str):
         if self.process.state() == QProcess.Running:
@@ -190,7 +244,6 @@ class ProductionTab(QWidget):
                 self.lbl_events.setText(f"Events: {int(match.group(2)):,}")
                 self.lbl_speed.setText(f"Speed: {match.group(3)} MB/s")
                 self.lbl_eta.setText(f"ETA: {match.group(4)} s")
-                # 통계 업데이트
                 self.last_stats = {
                     "events": match.group(2),
                     "avg_speed": match.group(3)
@@ -208,9 +261,10 @@ class ProductionTab(QWidget):
     @pyqtSlot(int, QProcess.ExitStatus)
     def handle_finished(self, exitCode, exitStatus):
         self.btn_run.setEnabled(True)
+        self.set_debug_controls_enabled(False) # 🌟 변환 완전 종료 시 버튼 비활성화 방어 로직
+        
         if exitStatus == QProcess.NormalExit and exitCode == 0:
             self.log_console.append(f"<span style='color:#5cb85c;'><b>[System] Conversion Successfully Finished!</b></span>")
-            # 🌟 변환 종료 시 DB 추적 및 푸쉬
             if self.current_raw_file and self.last_stats:
                 self.db.update_production_summary(self.current_raw_file, self.last_stats)
                 self.log_console.append("<span style='color:#6f42c1;'><b>[DB] Production Summary pushed to database.</b></span>")
