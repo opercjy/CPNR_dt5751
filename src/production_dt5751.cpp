@@ -1,4 +1,5 @@
 #include "EventHeader.h"
+
 #include <TApplication.h>
 #include <TCanvas.h>
 #include <TFile.h>
@@ -8,6 +9,7 @@
 #include <TMacro.h>
 #include <TParameter.h>
 #include <TSystem.h>
+
 #include <fstream>
 #include <getopt.h>
 #include <iostream>
@@ -18,14 +20,14 @@
 #include <numeric>
 #include <sys/select.h>
 #include <unistd.h>
-#include <map> // 🌟 Time Travel을 위한 헤더 추가
+#include <map>
 
+// ROOT C++ Time Travel
 #ifdef __ROOTCLING__
 #pragma link C++ class std::vector<uint16_t>+;
 #endif
 
 volatile std::sig_atomic_t g_running = 1;
-
 void sig_handler(int) {
     std::cout << "\n\033[1;33m[Interrupt] Received stop signal. Saving ROOT file gracefully...\033[0m\n";
     g_running = 0;
@@ -71,6 +73,7 @@ int main(int argc, char **argv) {
     }
 
     if (input_file.empty() && optind < argc) input_file = argv[optind];
+    
     if (input_file.empty()) {
         PrintUsage(argv[0]);
         return 1;
@@ -126,6 +129,7 @@ int main(int argc, char **argv) {
 
     if (debug_event_id < 0) {
         fOut = new TFile(output_file.c_str(), "RECREATE");
+        
         if (!config_file.empty()) {
             std::ifstream cfs(config_file);
             if (cfs.is_open()) {
@@ -156,16 +160,14 @@ int main(int argc, char **argv) {
     uint32_t current_event = 0;
     auto start_time = std::chrono::steady_clock::now();
     
-    // 🌟 [추가] 파일 포인터 위치를 기억하는 타임머신 맵
     std::map<uint32_t, std::streampos> evt_pos_map;
 
-    std::cout << "\033[1;32m[Production] Starting Universal Conversion (DT5751)...\033[0m\n";
+    std::cout << "\033[1;32m[Production] Starting Universal Conversion (DT5751)...\033[0m" << std::endl;
 
     while (g_running) {
         std::streampos current_pos = ifs.tellg();
         if (!ifs.read(reinterpret_cast<char *>(&header), sizeof(EventHeader))) break;
 
-        // 🌟 처음 만난 이벤트인지 확인하여 중복 기록 방지
         bool is_new_event = (evt_pos_map.find(header.EventID) == evt_pos_map.end());
         if (is_new_event) {
             evt_pos_map[header.EventID] = current_pos;
@@ -189,7 +191,6 @@ int main(int argc, char **argv) {
 
         size_t wave_len = header.RecordLength * active_ch;
         size_t wave_bytes_size = wave_len * sizeof(uint16_t);
-
         raw_waveform_buffer.resize(wave_len);
         ifs.read(reinterpret_cast<char *>(raw_waveform_buffer.data()), wave_bytes_size);
         
@@ -233,7 +234,6 @@ int main(int argc, char **argv) {
             }
         }
 
-        // 🌟 중복 필터: 오직 '새로운 이벤트'일 때만 ROOT 파일에 기록
         if (tOut && is_new_event) tOut->Fill();
 
         if (current_event % 2000 == 0) {
@@ -243,16 +243,14 @@ int main(int argc, char **argv) {
             double speed_bps = processed_bytes / elapsed_sec; 
             double eta_sec = (total_bytes - processed_bytes) / speed_bps;
 
-            std::cout << "\r\033[K" << "\033[1;36m[Progress]\033[0m " 
+            // 🌟 FIX: 파이썬 GUI 병목 해소를 위해 \r 제거 및 std::endl 적용
+            std::cout << "[Progress] " 
                       << std::fixed << std::setprecision(1) << progress << "% | "
                       << "Events: " << current_event << " | "
                       << "Speed: " << std::setprecision(1) << (speed_bps / 1024.0 / 1024.0) << " MB/s | "
-                      << "ETA: " << (int)eta_sec << " s" << std::flush;
+                      << "ETA: " << (int)eta_sec << " s" << std::endl;
         }
 
-        // ==============================================================================
-        // 🌟 타임머신이 장착된 인터랙티브 디버거 모드
-        // ==============================================================================
         if (debug_event_id >= 0 && (int)header.EventID == debug_event_id && active_ch > 0) {
             int disp_ch = 0;
             for (; disp_ch < MAX_DT5751_CH; ++disp_ch) {
@@ -286,7 +284,7 @@ int main(int argc, char **argv) {
             std::cout << "\n\n\033[1;33m[Debugger] Displaying Event " << debug_event_id << " CH" << disp_ch << " (Inverted Waveform)\033[0m\n";
             std::cout << "RecordLength: " << header.RecordLength << " | dt: " << dt_ns << " ns/Sample | Raw Baseline: " << baseline_ch[disp_ch] << "\n";
             std::cout << "[WAITING_CMD] Ready for Terminal Input (p: prev / n: next / j <id>: jump / q: quit)...\n";
-            std::cout << std::flush; 
+            std::cout << std::endl; 
 
             std::string cmd;
             bool continue_debug = true;
@@ -304,7 +302,7 @@ int main(int argc, char **argv) {
                 if (select(STDIN_FILENO + 1, &readfds, NULL, NULL, &timeout) > 0) {
                     std::cin >> cmd;
                     if (cmd == "q" || cmd == "quit") {
-                        std::cout << "\n[Debugger] Exiting debugger. Resuming full conversion...\n";
+                        std::cout << "\n[Debugger] Exiting debugger. Resuming full conversion...\n" << std::endl;
                         debug_event_id = -1; 
                         continue_debug = false;
                         if(c1) { c1->Close(); delete c1; c1 = nullptr; }
@@ -313,37 +311,33 @@ int main(int argc, char **argv) {
                         debug_event_id++; 
                         continue_debug = false;
                     } 
-                    // 🌟 [수정] 이전 탐색 기능 활성화
                     else if (cmd == "p" || cmd == "prev") {
                         int target = debug_event_id - 1;
                         if (evt_pos_map.count(target)) {
                             debug_event_id = target;
-                            ifs.clear(); // EOF 상태 등 리셋
+                            ifs.clear(); 
                             ifs.seekg(evt_pos_map[target]);
                             continue_debug = false;
                         } else {
-                            std::cout << "\n[Debugger] Event " << target << " is not in history (Memory).\n";
+                            std::cout << "\n[Debugger] Event " << target << " is not in history (Memory).\n" << std::endl;
                         }
                     } 
-                    // 🌟 [수정] 자유 점프 기능 활성화
                     else if (cmd == "j" || cmd == "jump") {
                         int target;
                         std::cin >> target;
                         if (evt_pos_map.count(target)) {
-                            // 과거로의 점프 (메모리에 있음)
                             debug_event_id = target;
                             ifs.clear();
                             ifs.seekg(evt_pos_map[target]);
                             continue_debug = false;
                         } else if (target > debug_event_id) {
-                            // 미래로의 점프 (계속 읽으면서 찾아감)
                             debug_event_id = target;
                             continue_debug = false;
                         } else {
-                            std::cout << "\n[Debugger] Target event is not in history.\n";
+                            std::cout << "\n[Debugger] Target event is not in history.\n" << std::endl;
                         }
                     }
-                    std::cout << std::flush;
+                    std::cout << std::endl;
                 }
             }
             if (debug_event_id >= 0) continue; 
@@ -351,7 +345,7 @@ int main(int argc, char **argv) {
     }
 
     if (g_running && debug_event_id < 0) {
-        std::cout << "\r\033[K\033[1;32m[Progress]\033[0m 100.0% | Events: " << current_event << " | Done.\n";
+        std::cout << "[Progress] 100.0% | Events: " << current_event << " | Done." << std::endl;
     }
 
     if (fOut) {
@@ -360,7 +354,6 @@ int main(int argc, char **argv) {
         delete fOut;
     }
 
-    // 🌟 오프라인 처리 종료 시 요약 보고서 출력
     auto end_time = std::chrono::steady_clock::now();
     double total_sec = std::chrono::duration_cast<std::chrono::duration<double>>(end_time - start_time).count();
     double total_mb = processed_bytes / (1024.0 * 1024.0);
@@ -374,7 +367,7 @@ int main(int argc, char **argv) {
                   << " - Processed Evts  : " << current_event << " events\n"
                   << " - Processed Size  : " << std::fixed << std::setprecision(2) << total_mb << " MB\n"
                   << " - Avg Speed       : " << std::fixed << std::setprecision(2) << avg_speed << " MB/s\n"
-                  << "\033[1;35m============================================\033[0m\n\n";
+                  << "\033[1;35m============================================\033[0m\n" << std::endl;
     }
 
     if (app) delete app;

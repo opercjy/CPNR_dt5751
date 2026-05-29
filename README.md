@@ -1,6 +1,7 @@
 
 ---
 
+```markdown
 # HEP 3-Tier DAQ Control Center for CAEN DT5751
 
 ![Platform](https://img.shields.io/badge/Platform-Linux-blue)
@@ -140,17 +141,6 @@ make -j4
 source setup_env.sh
 
 ```
-
-<img width="1220" height="940" alt="image" src="https://github.com/user-attachments/assets/1903e03f-0577-4d3d-97db-d3399f33ad50" />
-<img width="1220" height="940" alt="image" src="https://github.com/user-attachments/assets/09bb4647-d06a-4cf9-8054-0dc058fb9df4" />
-<img width="1220" height="940" alt="image" src="https://github.com/user-attachments/assets/496082c7-5f62-4729-bbfe-f3e0fafcd311" />
-<img width="1220" height="940" alt="image" src="https://github.com/user-attachments/assets/1fbb377c-3ceb-48d7-b8f2-88bb1a155397" />
-<img width="1220" height="940" alt="image" src="https://github.com/user-attachments/assets/203237a9-fbd9-4d7d-a6e5-e011979af0f2" />
-<img width="1220" height="940" alt="image" src="https://github.com/user-attachments/assets/7f1da594-9a48-4364-bfcc-7113d26abb28" />
-
-
-
-
 
 ---
 

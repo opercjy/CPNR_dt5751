@@ -10,7 +10,14 @@ from PyQt5.QtCore import Qt, QSettings
 class ConfigTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.bin_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        
+        # 🌟 프로젝트 루트 앵커링
+        curr = os.path.abspath(os.path.dirname(__file__))
+        while curr != '/' and not os.path.exists(os.path.join(curr, 'CMakeLists.txt')):
+            curr = os.path.dirname(curr)
+        self.proj_dir = curr if curr != '/' else os.getcwd()
+        self.config_dir = os.path.join(self.proj_dir, "config")
+        
         self.settings = QSettings("CPNR", "DT5751_ConfigTab")
         self.current_config_path = ""
         self.config = configparser.ConfigParser()
@@ -100,12 +107,9 @@ class ConfigTab(QWidget):
         sim_vbox = QVBoxLayout()
         input_grid = QGridLayout()
         input_grid.addWidget(QLabel("Target Baseline (%):"), 0, 0)
-        
-        # 🌟 제1원리: 음극성 펄스를 위한 90% (ADC 900 부근) 동적 범위 극대화 기본 설정
         self.spin_base_pct = QSpinBox(); self.spin_base_pct.setRange(10, 95); self.spin_base_pct.setValue(90)
         self.spin_base_pct.valueChanged.connect(self.update_adc_simulator)
         input_grid.addWidget(self.spin_base_pct, 0, 1)
-        
         input_grid.addWidget(QLabel("Trigger Depth (mV):"), 1, 0)
         self.spin_trg_mv = QDoubleSpinBox(); self.spin_trg_mv.setRange(1.0, 1000.0); self.spin_trg_mv.setValue(15.0)
         self.spin_trg_mv.valueChanged.connect(self.update_adc_simulator)
@@ -136,15 +140,20 @@ class ConfigTab(QWidget):
             self.load_file(saved_path)
 
     def load_config_dialog(self):
-        last_dir = os.path.dirname(self.settings.value("last_loaded_config", self.bin_dir))
+        last_dir = os.path.dirname(self.settings.value("last_loaded_config", self.config_dir))
         path, _ = QFileDialog.getOpenFileName(self, "Select Config File", last_dir, "Config Files (*.conf *.ini);;All Files (*)")
-        if path: self.load_file(path)
+        if path: 
+            rel_path = os.path.relpath(path, self.proj_dir)
+            self.load_file(rel_path)
 
-    def load_file(self, path):
-        self.current_config_path = path
-        self.settings.setValue("last_loaded_config", path)
-        self.lbl_current_file.setText(f"Current File: {os.path.basename(path)}")
-        self.config.read(path)
+    def load_file(self, rel_path):
+        full_path = os.path.abspath(os.path.join(self.proj_dir, rel_path))
+        if not os.path.exists(full_path): return
+        
+        self.current_config_path = full_path
+        self.settings.setValue("last_loaded_config", full_path)
+        self.lbl_current_file.setText(f"Current File: {os.path.basename(full_path)}")
+        self.config.read(full_path)
         self.table.setRowCount(0)
         for section in self.config.sections():
             for key, val in self.config.items(section):
@@ -159,7 +168,6 @@ class ConfigTab(QWidget):
                 chk.setChecked(bool((mask_val >> i) & 1))
         except: pass
 
-    # ... 이하 update_mask_calc, apply_mask_to_table, update_time_simulator 등 계산 로직은 이전 답변과 완벽히 동일 ...
     def update_mask_calc(self):
         mask = sum((1 << i) for i, chk in enumerate(self.ch_checks) if chk.isChecked())
         self.lbl_mask_res.setText(str(mask))
