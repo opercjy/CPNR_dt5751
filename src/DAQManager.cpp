@@ -20,6 +20,12 @@ DAQManager::DAQManager(const std::string &config_file, const std::string &output
     zmq_pub_ = zmq_socket(zmq_ctx_, ZMQ_PUB);
     int hwm = 5000;
     zmq_setsockopt(zmq_pub_, ZMQ_SNDHWM, &hwm, sizeof(hwm));
+    
+    // 🌟 [핵심 해결] ZMQ_LINGER = 0 설정!
+    // 남은 패킷에 미련을 갖지 않고 즉시 컨텍스트를 파괴하도록 하여 좀비 프로세스화를 원천 차단합니다.
+    int linger = 0;
+    zmq_setsockopt(zmq_pub_, ZMQ_LINGER, &linger, sizeof(linger));
+    
     zmq_bind(zmq_pub_, "tcp://127.0.0.1:5555");
 
     if (!output_file_.empty()) {
@@ -28,7 +34,7 @@ DAQManager::DAQManager(const std::string &config_file, const std::string &output
             std::filesystem::create_directories(p.parent_path());
         }
         
-        // 🌟 FIX 1: std::ios::out 모드 추가 및 위험한 pubsetbuf 제거
+        // 파일 쓰기(std::ios::out) 모드를 추가하여 파일이 생성되지 않던 현상 해결
         out_stream_.open(output_file_, std::ios::out | std::ios::binary);
         if (!out_stream_.is_open()) {
             std::cerr << "\n\033[1;31m[Fatal Error]\033[0m Cannot open output file: " << output_file_ << "\n";
@@ -149,24 +155,27 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
     size_t total_bytes_written = 0; 
     size_t last_bytes_written = 0; 
 
-    std::cout << "\n\033[1;32m[DAQ Started]\033[0m Press Ctrl+C to stop gracefully.\n";
+    std::cout << "\n\033[1;32m[DAQ Started]\033[0m Press Ctrl+C to stop gracefully." << std::endl;
 
     while (is_running) {
         auto now = std::chrono::steady_clock::now();
 
+        // 시간 및 이벤트 리미트 검사를 루프 최상단에 배치
         if (max_events_ > 0 && (int)event_count >= max_events_) {
-            std::cout << "\n\033[1;33m[System] Event Limit Reached. Stopping...\033[0m\n";
+            std::cout << "\n\033[1;33m[System] Event Limit Reached. Stopping...\033[0m" << std::endl;
             break;
         }
         if (run_time_sec_ > 0) {
             if (std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count() >= run_time_sec_) {
-                std::cout << "\n\033[1;33m[System] Time Limit Reached. Stopping...\033[0m\n";
+                std::cout << "\n\033[1;33m[System] Time Limit Reached. Stopping...\033[0m" << std::endl;
                 break;
             }
         }
 
         double elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log_time).count();
-        if (elapsed_ms >= 500.0) {
+        
+        // 1초마다 무조건 시계 강제 갱신
+        if (elapsed_ms >= 1000.0) {
             double rate = (log_events / elapsed_ms) * 1000.0;
             double speed_mbps = ((total_bytes_written - last_bytes_written) / 1048576.0) / (elapsed_ms / 1000.0);
             last_bytes_written = total_bytes_written;
@@ -175,14 +184,13 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
             int mins = total_sec / 60;
             int secs = total_sec % 60;
             
-            // 🌟 FIX 2: \r 대신 \n을 써야 파이썬의 readline() 버퍼가 꽉 차서 C++ 전체가 멈추는 것을 막습니다.
+            // \r 대신 std::endl 적용하여 파이썬 버퍼링 체증 해결
             std::cout << "[DAQ] "
                       << std::setfill('0') << std::setw(2) << mins << ":" << std::setw(2) << secs << " | "
                       << "Evt: " << event_count << " | "
                       << std::fixed << std::setprecision(1) << rate << " Hz | "
                       << std::fixed << std::setprecision(1) << speed_mbps << " MB/s | "
-                      << "Drop: " << zmq_drops
-                      << "\n";
+                      << "Drop: " << zmq_drops << std::endl;
             
             log_events = 0;
             zmq_drops = 0;
@@ -277,5 +285,5 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
               << " - Total Events    : " << event_count << " events\n"
               << " - Avg Trg Rate    : " << std::fixed << std::setprecision(1) << avg_rate << " Hz\n"
               << " - Total Data Size : " << std::fixed << std::setprecision(2) << total_mb << " MB\n"
-              << "\033[1;32m=========================================\033[0m\n\n";
+              << "\033[1;32m=========================================\033[0m\n" << std::endl;
 }
