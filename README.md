@@ -1,7 +1,4 @@
 
----
-
-```markdown
 # HEP 3-Tier DAQ Control Center for CAEN DT5751
 
 ![Platform](https://img.shields.io/badge/Platform-Linux-blue)
