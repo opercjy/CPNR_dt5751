@@ -11,7 +11,6 @@ class ConfigTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         
-        # 🌟 프로젝트 루트 앵커링
         curr = os.path.abspath(os.path.dirname(__file__))
         while curr != '/' and not os.path.exists(os.path.join(curr, 'CMakeLists.txt')):
             curr = os.path.dirname(curr)
@@ -118,7 +117,10 @@ class ConfigTab(QWidget):
         self.lbl_res_offset = QLabel(); self.lbl_res_trg = QLabel()
         sim_vbox.addWidget(QLabel("Required DCOffset (16-bit DAC):")); sim_vbox.addWidget(self.lbl_res_offset)
         sim_vbox.addWidget(QLabel("Required TriggerThreshold (10-bit ADC):")); sim_vbox.addWidget(self.lbl_res_trg)
-        self.btn_apply_adc = QPushButton("Apply ADC to Active Channels")
+        
+        # 🌟 일괄 적용 버튼으로 텍스트 변경
+        self.btn_apply_adc = QPushButton("Apply ADC to ALL Active Channels")
+        self.btn_apply_adc.setStyleSheet("font-weight: bold; background-color: #198754; color: white;")
         self.btn_apply_adc.clicked.connect(self.apply_adc_to_table)
         sim_vbox.addWidget(self.btn_apply_adc)
 
@@ -215,19 +217,28 @@ class ConfigTab(QWidget):
         self.line_trg.setValue(adc_trigger)
 
     def apply_adc_to_table(self):
+        """
+        🌟 [핵심 리팩토링 로직]
+        현재 UI에 체크된(활성화된) 모든 채널을 검사하여,
+        일괄적으로 DCOffset과 TriggerThreshold를 테이블에 꽂아넣습니다. (없으면 새로 생성)
+        """
         if self.table.rowCount() == 0: return
+        
         base_pct = self.spin_base_pct.value() / 100.0
         trg_mv = self.spin_trg_mv.value()
         calc_offset = str(int((1.0 - base_pct) * 65535))
         calc_trg = str(int((base_pct * 1023) - (trg_mv / 0.9765)))
-        for row in range(self.table.rowCount()):
-            section = self.table.item(row, 0).text()
-            param = self.table.item(row, 1).text()
-            if section.startswith("Channel_"):
-                if param == "DCOffset" or param == "TriggerThreshold":
-                    val = calc_offset if param == "DCOffset" else calc_trg
-                    self.table.setItem(row, 2, QTableWidgetItem(val))
-                    self.table.item(row, 2).setBackground(Qt.yellow)
+
+        # 체크박스 상태를 읽어 활성 채널 식별
+        active_channels = [i for i, chk in enumerate(self.ch_checks) if chk.isChecked()]
+        if not active_channels:
+            active_channels = [0] # 하나도 안 켜져 있으면 방어적으로 CH0이라도 적용
+            
+        for ch in active_channels:
+            sec = f"Channel_{ch}"
+            # 🌟 테이블에 채널 섹션이 없더라도 set_table_value가 동적으로 맨 아래에 로우(Row)를 만들어 넣습니다.
+            self.set_table_value(sec, "DCOffset", calc_offset)
+            self.set_table_value(sec, "TriggerThreshold", calc_trg)
 
     def set_table_value(self, target_section, target_param, value):
         for row in range(self.table.rowCount()):
@@ -235,6 +246,8 @@ class ConfigTab(QWidget):
                 self.table.setItem(row, 2, QTableWidgetItem(value))
                 self.table.item(row, 2).setBackground(Qt.yellow)
                 return
+        
+        # 🌟 행이 존재하지 않으면 무조건 새로 추가!
         row = self.table.rowCount()
         self.table.insertRow(row)
         self.table.setItem(row, 0, QTableWidgetItem(target_section))
