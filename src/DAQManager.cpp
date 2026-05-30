@@ -21,8 +21,6 @@ DAQManager::DAQManager(const std::string &config_file, const std::string &output
     int hwm = 5000;
     zmq_setsockopt(zmq_pub_, ZMQ_SNDHWM, &hwm, sizeof(hwm));
     
-    // 🌟 [핵심 해결] ZMQ_LINGER = 0 설정!
-    // 남은 패킷에 미련을 갖지 않고 즉시 컨텍스트를 파괴하도록 하여 좀비 프로세스화를 원천 차단합니다.
     int linger = 0;
     zmq_setsockopt(zmq_pub_, ZMQ_LINGER, &linger, sizeof(linger));
     
@@ -34,7 +32,6 @@ DAQManager::DAQManager(const std::string &config_file, const std::string &output
             std::filesystem::create_directories(p.parent_path());
         }
         
-        // 파일 쓰기(std::ios::out) 모드를 추가하여 파일이 생성되지 않던 현상 해결
         out_stream_.open(output_file_, std::ios::out | std::ios::binary);
         if (!out_stream_.is_open()) {
             std::cerr << "\n\033[1;31m[Fatal Error]\033[0m Cannot open output file: " << output_file_ << "\n";
@@ -87,11 +84,17 @@ void DAQManager::SetupHardware() {
 
     int pol_val = config_.GetInt("Digitizer", "TriggerPolarity", 1); 
     
+    // 🌟 [리팩토링] CH0를 마스터 템플릿(Fallback)으로 취급
+    uint32_t master_offset = config_.GetInt("Channel_0", "DCOffset", 32768);
+    uint32_t master_thr    = config_.GetInt("Channel_0", "TriggerThreshold", 500);
+
     for (int ch = 0; ch < MAX_DT5751_CH; ++ch) {
         if ((channel_mask >> ch) & 1) {
             std::string ch_sec = "Channel_" + std::to_string(ch);
-            uint32_t offset = config_.GetInt(ch_sec, "DCOffset", 32768); 
-            uint32_t thr = config_.GetInt(ch_sec, "TriggerThreshold", 500);
+            
+            // 🌟 해당 채널(예: Channel_1)의 설정이 없으면 CH0의 설정(마스터 템플릿)을 자동으로 상속받아 일괄 적용합니다.
+            uint32_t offset = config_.GetInt(ch_sec, "DCOffset", master_offset); 
+            uint32_t thr = config_.GetInt(ch_sec, "TriggerThreshold", master_thr);
             
             if (thr > 1023) {
                 std::cerr << "\033[1;33m[Warning] CH" << ch << " Threshold (" << thr << ") exceeds 10-bit limit. Forced to 1023.\033[0m\n";
@@ -160,7 +163,6 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
     while (is_running) {
         auto now = std::chrono::steady_clock::now();
 
-        // 시간 및 이벤트 리미트 검사를 루프 최상단에 배치
         if (max_events_ > 0 && (int)event_count >= max_events_) {
             std::cout << "\n\033[1;33m[System] Event Limit Reached. Stopping...\033[0m" << std::endl;
             break;
@@ -173,8 +175,6 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
         }
 
         double elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_log_time).count();
-        
-        // 1초마다 무조건 시계 강제 갱신
         if (elapsed_ms >= 1000.0) {
             double rate = (log_events / elapsed_ms) * 1000.0;
             double speed_mbps = ((total_bytes_written - last_bytes_written) / 1048576.0) / (elapsed_ms / 1000.0);
@@ -184,7 +184,6 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
             int mins = total_sec / 60;
             int secs = total_sec % 60;
             
-            // \r 대신 std::endl 적용하여 파이썬 버퍼링 체증 해결
             std::cout << "[DAQ] "
                       << std::setfill('0') << std::setw(2) << mins << ":" << std::setw(2) << secs << " | "
                       << "Evt: " << event_count << " | "
