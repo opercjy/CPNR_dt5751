@@ -128,7 +128,7 @@ class DaqTab(QWidget):
 
         self.terminal = QTextEdit(); self.terminal.setReadOnly(True); self.terminal.setFont(QFont("Monospace", 10))
         self.terminal.setStyleSheet("background-color: #ffffff; color: #212529; border: 1px solid #ced4da;")
-        self.terminal.setLineWrapMode(QTextEdit.NoWrap) # 자동 줄바꿈 끄기
+        self.terminal.setLineWrapMode(QTextEdit.NoWrap) 
         layout.addWidget(self.terminal)
 
     def load_settings(self):
@@ -136,7 +136,7 @@ class DaqTab(QWidget):
         self.config_input.setText(saved_config)
         self.output_input.setText(self.settings.value("last_output", "data/data_run.dat"))
         self.spin_events.setValue(int(self.settings.value("last_events", 0)))
-        self.spin_time.setValue(int(self.settings.value("last_time", 20))) # 디폴트 20초 반영
+        self.spin_time.setValue(int(self.settings.value("last_time", 20))) 
         if saved_config: self.parse_env_from_config(saved_config)
 
     def save_settings(self):
@@ -188,8 +188,6 @@ class DaqTab(QWidget):
         b_open = "<b>" if bold else ""; b_close = "</b>" if bold else ""
         self.terminal.append(f'<span style="color: {color};">{b_open}{safe_text}{b_close}</span>')
         self.terminal.moveCursor(QTextCursor.End)
-        
-        # 🌟 글자가 잘려보이는 착시현상 해결: 가로 스크롤을 항상 왼쪽(0)으로 고정!
         self.terminal.horizontalScrollBar().setValue(0)
 
     def update_dashboard(self, stats):
@@ -240,9 +238,20 @@ class DaqTab(QWidget):
         config.set("Environment", "Operator", self.operator_input.text().strip())
         config.set("Environment", "AppliedHV", self.hv_input.text().strip())
         config.set("Environment", "Temperature", self.temp_input.text().strip())
+        
+        # 🌟 핵심 리팩토링: 오토 스캔 모드 시 활성화된 '모든 채널'을 파악해 일괄 적용
         if mode == 2:
-            for sec in config.sections():
-                if sec.startswith("Channel_"): config.set(sec, "TriggerThreshold", str(current_th))
+            try:
+                mask = int(config.get("Digitizer", "ChannelMask", fallback="1"))
+                active_channels = [i for i in range(4) if (mask >> i) & 1]
+                for ch in active_channels:
+                    sec = f"Channel_{ch}"
+                    if not config.has_section(sec):
+                        config.add_section(sec)
+                    config.set(sec, "TriggerThreshold", str(current_th))
+            except Exception as e:
+                self.append_log(f"[Warning] Failed to parse ChannelMask for Threshold Scan: {e}")
+                
         with open(config_full, 'w') as f: config.write(f)
 
         if mode == 2: self.append_log(f"\n[SCAN AUTOMATION] Target Threshold updated to {current_th} ADC.")
@@ -261,8 +270,6 @@ class DaqTab(QWidget):
         exe_path = os.path.join(self.bin_dir, "frontend_dt5751")
         cmd = [exe_path, "-c", config_path_str, "-o", output_file]
 
-        # 🌟 치명적 버그 수정: 여기서 제가 삭제했던 2줄을 완벽 복원했습니다!
-        # 이제 입력된 20초(Time) 및 Event 한계를 C++ 프로세스로 정확히 전달합니다.
         if self.spin_events.value() > 0: 
             cmd.extend(["-n", str(self.spin_events.value())])
         if self.spin_time.value() > 0: 
