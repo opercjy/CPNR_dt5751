@@ -269,7 +269,6 @@ class DaqTab(QWidget):
             self.val_board_temp.setStyleSheet(self.val_style_warn if temp > 65 else self.val_style)
             self.val_board_temp.setText(f"{temp} °C")
             
-        # 🌟 C++가 연산하여 던진 Live-Time 및 Dead-time 정보를 메모리에 적재
         if "live_time" in data:
             self.last_stats['live_time'] = data['live_time']
             self.last_stats['elapsed_time'] = data['elapsed_time']
@@ -291,78 +290,89 @@ class DaqTab(QWidget):
         self.run_single_batch()
 
     def run_single_batch(self):
-        self.is_recovering = False
-        self.last_stats = {}
-        
-        if self.chk_inf_repeat.isChecked():
-            self.val_batch.setText(f"{self.current_batch} / Inf")
-        else:
-            self.val_batch.setText(f"{self.current_batch} / {self.total_batches}")
-        
-        output_file = self.base_output_path
-        name, ext = os.path.splitext(self.base_output_path)
-        mode = self.combo_mode.currentIndex()
-        
-        if mode == 1 or self.chk_inf_repeat.isChecked(): 
-            output_file = f"{name}_part{self.current_batch:04d}{ext}"
-        elif mode == 2:
-            current_th = self.scan_values[self.current_batch - 1]
-            output_file = f"{name}_th{current_th}{ext}"
+        # 🌟 [강력한 에러 보호망 추가] 시작 중 DB나 파일 에러 발생 시 UI 먹통(허상) 차단
+        try:
+            self.is_recovering = False
+            self.last_stats = {}
+            
+            if self.chk_inf_repeat.isChecked():
+                self.val_batch.setText(f"{self.current_batch} / Inf")
+            else:
+                self.val_batch.setText(f"{self.current_batch} / {self.total_batches}")
+            
+            output_file = self.base_output_path
+            name, ext = os.path.splitext(self.base_output_path)
+            mode = self.combo_mode.currentIndex()
+            
+            if mode == 1 or self.chk_inf_repeat.isChecked(): 
+                output_file = f"{name}_part{self.current_batch:04d}{ext}"
+            elif mode == 2:
+                current_th = self.scan_values[self.current_batch - 1]
+                output_file = f"{name}_th{current_th}{ext}"
 
-        out_file_full = os.path.abspath(os.path.join(self.proj_dir, output_file))
-        os.makedirs(os.path.dirname(out_file_full), exist_ok=True)
+            out_file_full = os.path.abspath(os.path.join(self.proj_dir, output_file))
+            os.makedirs(os.path.dirname(out_file_full), exist_ok=True)
 
-        config_path_str = self.config_input.text()
-        config_full = os.path.abspath(os.path.join(self.proj_dir, config_path_str))
+            config_path_str = self.config_input.text()
+            config_full = os.path.abspath(os.path.join(self.proj_dir, config_path_str))
 
-        config = configparser.ConfigParser(); config.optionxform = str; config.read(config_full)
-        if not config.has_section("Environment"): config.add_section("Environment")
-        config.set("Environment", "Operator", self.operator_input.text().strip())
-        config.set("Environment", "AppliedHV", self.hv_input.text().strip())
-        config.set("Environment", "Temperature", self.temp_input.text().strip())
-        
-        if mode == 2:
-            try:
-                mask = int(config.get("Digitizer", "ChannelMask", fallback="1"))
-                active_channels = [i for i in range(4) if (mask >> i) & 1]
-                for ch in active_channels:
-                    sec = f"Channel_{ch}"
-                    if not config.has_section(sec):
-                        config.add_section(sec)
-                    config.set(sec, "TriggerThreshold", str(current_th))
-            except Exception as e:
-                self.append_log(f"[Warning] Failed to parse ChannelMask for Threshold Scan: {e}")
-                
-        with open(config_full, 'w') as f: config.write(f)
+            config = configparser.ConfigParser(); config.optionxform = str; config.read(config_full)
+            if not config.has_section("Environment"): config.add_section("Environment")
+            config.set("Environment", "Operator", self.operator_input.text().strip())
+            config.set("Environment", "AppliedHV", self.hv_input.text().strip())
+            config.set("Environment", "Temperature", self.temp_input.text().strip())
+            
+            if mode == 2:
+                try:
+                    mask = int(config.get("Digitizer", "ChannelMask", fallback="1"))
+                    active_channels = [i for i in range(4) if (mask >> i) & 1]
+                    for ch in active_channels:
+                        sec = f"Channel_{ch}"
+                        if not config.has_section(sec):
+                            config.add_section(sec)
+                        config.set(sec, "TriggerThreshold", str(current_th))
+                except Exception as e:
+                    self.append_log(f"[Warning] Failed to parse ChannelMask for Threshold Scan: {e}")
+                    
+            with open(config_full, 'w') as f: config.write(f)
 
-        if mode == 2: self.append_log(f"\n[SCAN AUTOMATION] Target Threshold updated to {current_th} ADC.")
+            if mode == 2: self.append_log(f"\n[SCAN AUTOMATION] Target Threshold updated to {current_th} ADC.")
 
-        current_env_data = {
-            "Operator": self.operator_input.text().strip(),
-            "Applied HV": self.hv_input.text().strip(),
-            "Temperature (C)": self.temp_input.text().strip()
-        }
-        if self.env_data_provider: current_env_data.update(self.env_data_provider())
+            current_env_data = {
+                "Operator": self.operator_input.text().strip(),
+                "Applied HV": self.hv_input.text().strip(),
+                "Temperature (C)": self.temp_input.text().strip()
+            }
+            if self.env_data_provider: current_env_data.update(self.env_data_provider())
 
-        self.current_run_id = self.db.record_run_start(output_file, current_env_data, config_full)
-        self.append_log(f"\n========== [ Batch/Scan {self.current_batch} Started ] ==========")
-        self.append_log(f"--- Output: {output_file} | DB ID: {self.current_run_id} ---")
-        
-        exe_path = os.path.join(self.bin_dir, "frontend_dt5751")
-        cmd = [exe_path, "-c", config_path_str, "-o", output_file]
+            # 문제의 원인이었던 DB 진입 지점
+            self.current_run_id = self.db.record_run_start(output_file, current_env_data, config_full)
+            
+            self.append_log(f"\n========== [ Batch/Scan {self.current_batch} Started ] ==========")
+            self.append_log(f"--- Output: {output_file} | DB ID: {self.current_run_id} ---")
+            
+            exe_path = os.path.join(self.bin_dir, "frontend_dt5751")
+            cmd = [exe_path, "-c", config_path_str, "-o", output_file]
 
-        if self.spin_events.value() > 0: 
-            cmd.extend(["-n", str(self.spin_events.value())])
-        if self.spin_time.value() > 0: 
-            cmd.extend(["-t", str(self.spin_time.value())])
+            if self.spin_events.value() > 0: 
+                cmd.extend(["-n", str(self.spin_events.value())])
+            if self.spin_time.value() > 0: 
+                cmd.extend(["-t", str(self.spin_time.value())])
 
-        self.daq_process = ProcessManager(cmd, cwd=self.proj_dir)
-        self.daq_process.log_signal.connect(self.append_log)
-        self.daq_process.stat_signal.connect(self.update_dashboard)
-        self.daq_process.finished_signal.connect(self.on_batch_finished)
-        self.daq_process.start()
-        
-        self.watchdog_timer.start(30000)
+            self.daq_process = ProcessManager(cmd, cwd=self.proj_dir)
+            self.daq_process.log_signal.connect(self.append_log)
+            self.daq_process.stat_signal.connect(self.update_dashboard)
+            self.daq_process.finished_signal.connect(self.on_batch_finished)
+            self.daq_process.start()
+            
+            self.watchdog_timer.start(30000)
+
+        # 🌟 에러 발생 시 UI를 강제로 원상복구 시키는 구조
+        except Exception as e:
+            self.append_log(f"<br><span style='color:#dc3545; font-size:14px;'><b>[CRITICAL ERROR] DAQ Start Failed: {str(e)}</b></span>")
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
+            self.combo_mode.setEnabled(True)
 
     def trigger_watchdog_recovery(self):
         self.watchdog_timer.stop()
@@ -416,7 +426,15 @@ class DaqTab(QWidget):
         self.watchdog_timer.stop() 
         self.total_batches = 0 
         self.chk_inf_repeat.setChecked(False) 
-        if self.daq_process and self.daq_process.isRunning(): self.daq_process.stop()
+        self.append_log("<br><span style='color:#dc3545; font-weight:bold;'>[System] DAQ sequence manually stopped by user.</span>")
+        
+        # 🌟 수동 중단 시 프로세스가 돌고 있든 안 돌고 있든 UI 버튼을 확실하게 리셋
+        if self.daq_process and self.daq_process.isRunning():
+            self.daq_process.stop()
+        else:
+            self.btn_start.setEnabled(True)
+            self.btn_stop.setEnabled(False)
+            self.combo_mode.setEnabled(True)
 
     def closeEvent(self, event):
         self.watchdog_timer.stop()
