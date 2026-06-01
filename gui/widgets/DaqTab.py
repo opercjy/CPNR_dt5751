@@ -1,13 +1,53 @@
 import os
 import shutil
 import configparser
+import json
+import zmq
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
                              QPushButton, QLineEdit, QLabel, QTextEdit, 
                              QGroupBox, QSpinBox, QComboBox, QFileDialog, QCheckBox)
 from PyQt5.QtGui import QFont, QTextCursor
-from PyQt5.QtCore import QTimer, QSettings
+from PyQt5.QtCore import QTimer, QSettings, QThread, pyqtSignal
 from core.ProcessManager import ProcessManager
 from core.DatabaseManager import DatabaseManager
+
+class CtrlReceiver(QThread):
+    run_completed = pyqtSignal()
+    stat_received = pyqtSignal(dict)
+
+    def __init__(self, port=5555):
+        super().__init__()
+        self.port = port
+        self.running = True
+
+    def run(self):
+        context = zmq.Context.instance()
+        socket = context.socket(zmq.SUB)
+        socket.connect(f"tcp://127.0.0.1:{self.port}")
+        
+        socket.setsockopt_string(zmq.SUBSCRIBE, "CTRL")
+        socket.setsockopt_string(zmq.SUBSCRIBE, "STAT")
+
+        while self.running:
+            try:
+                if socket.poll(100):
+                    frames = socket.recv_multipart()
+                    if len(frames) == 2:
+                        if frames[0] == b"CTRL" and frames[1] == b"RUN_COMPLETED":
+                            self.run_completed.emit()
+                        elif frames[0] == b"STAT":
+                            try:
+                                stat_data = json.loads(frames[1].decode('utf-8'))
+                                self.stat_received.emit(stat_data)
+                            except: pass
+            except Exception as e:
+                pass
+        socket.close()
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
 
 class DaqTab(QWidget):
     def __init__(self, parent=None, env_data_provider=None):
@@ -40,6 +80,11 @@ class DaqTab(QWidget):
         self.disk_timer.start(1000)
         self.update_disk_space()
 
+        self.ctrl_receiver = CtrlReceiver()
+        self.ctrl_receiver.run_completed.connect(self.on_run_completed_received)
+        self.ctrl_receiver.stat_received.connect(self.on_stat_received)
+        self.ctrl_receiver.start()
+
     def setup_ui(self):
         layout = QVBoxLayout(self)
 
@@ -66,7 +111,7 @@ class DaqTab(QWidget):
         self.temp_input = QLineEdit("20.0")
         env_layout.addWidget(QLabel("Operator:")); env_layout.addWidget(self.operator_input)
         env_layout.addWidget(QLabel("  |  Applied HV:")); env_layout.addWidget(self.hv_input)
-        env_layout.addWidget(QLabel("  |  Temp (°C):")); env_layout.addWidget(self.temp_input)
+        env_layout.addWidget(QLabel("  |  Room Temp (°C):")); env_layout.addWidget(self.temp_input)
         file_layout.addLayout(env_layout, 2, 1, 1, 2)
         file_group.setLayout(file_layout); layout.addWidget(file_group)
 
@@ -88,8 +133,7 @@ class DaqTab(QWidget):
         self.spin_batch = QSpinBox(); self.spin_batch.setRange(2, 999); self.spin_batch.setEnabled(False)
         cond_layout1.addWidget(self.lbl_batch); cond_layout1.addWidget(self.spin_batch)
         
-        # 🌟 [패치] 무한 자동 반복 토글 추가 (24시간 무인 동작용)
-        self.chk_inf_repeat = QCheckBox("∞ Infinite Auto-Repeat")
+        self.chk_inf_repeat = QCheckBox("Infinite Auto-Repeat")
         self.chk_inf_repeat.setStyleSheet("font-weight: bold; color: #198754;")
         cond_layout1.addWidget(self.chk_inf_repeat)
         
@@ -120,6 +164,11 @@ class DaqTab(QWidget):
         dash_layout.addWidget(QLabel("Trg Rate:", styleSheet=lbl_style), 1, 0); self.val_rate = QLabel("0.0 Hz", styleSheet=self.val_style); dash_layout.addWidget(self.val_rate, 1, 1)
         dash_layout.addWidget(QLabel("Data Speed:", styleSheet=lbl_style), 1, 2); self.val_speed = QLabel("0.00 MB/s", styleSheet=self.val_style); dash_layout.addWidget(self.val_speed, 1, 3)
         dash_layout.addWidget(QLabel("ZMQ Drops:", styleSheet=lbl_style), 1, 4); self.val_drops = QLabel("0", styleSheet=self.val_style); dash_layout.addWidget(self.val_drops, 1, 5)
+        
+        dash_layout.addWidget(QLabel("Board Temp:", styleSheet=lbl_style), 1, 6)
+        self.val_board_temp = QLabel("0 °C", styleSheet=self.val_style)
+        dash_layout.addWidget(self.val_board_temp, 1, 7)
+        
         dash_group.setLayout(dash_layout); layout.addWidget(dash_group)
 
         btn_layout = QHBoxLayout()
@@ -205,6 +254,13 @@ class DaqTab(QWidget):
         drops = int(stats.get('drops', '0'))
         self.val_drops.setStyleSheet(self.val_style_warn if drops > 0 else self.val_style); self.val_drops.setText(str(drops))
 
+    def on_stat_received(self, data):
+        if "temp" in data:
+            temp = data["temp"]
+            self.last_stats['board_temp'] = temp
+            self.val_board_temp.setStyleSheet(self.val_style_warn if temp > 65 else self.val_style)
+            self.val_board_temp.setText(f"{temp} °C")
+
     def start_daq_sequence(self):
         self.save_settings()
         self.base_output_path = self.output_input.text()
@@ -223,9 +279,8 @@ class DaqTab(QWidget):
     def run_single_batch(self):
         self.last_stats = {}
         
-        # 🌟 무한 루프 모드일 경우 총 배치 수를 가변적으로 표시
         if self.chk_inf_repeat.isChecked():
-            self.val_batch.setText(f"{self.current_batch} / ∞")
+            self.val_batch.setText(f"{self.current_batch} / Inf")
         else:
             self.val_batch.setText(f"{self.current_batch} / {self.total_batches}")
         
@@ -298,24 +353,27 @@ class DaqTab(QWidget):
             self.db.update_daq_summary(self.current_run_id, self.last_stats)
             self.append_log("[DB] DAQ Summary successfully pushed to database.")
 
-        # 🌟 [패치] 프로세스가 목표(Event/Time Limit) 달성으로 정상 종료(0) 되었을 때, 무한 재시작 처리
-        if returncode == 0:
-            if self.chk_inf_repeat.isChecked():
-                self.current_batch += 1
-                self.total_batches = max(self.total_batches, self.current_batch)
-                self.append_log("[System] Infinite Auto-Repeat is ON. Starting next run in 2 seconds...")
-                QTimer.singleShot(2000, self.run_single_batch) # 파일 닫힘 대기용 2초 딜레이
-            elif self.current_batch < self.total_batches:
-                self.current_batch += 1
-                self.run_single_batch()
-            else:
-                self.append_log("\n========== [ All DAQ Sequences Completed ] ==========")
-                self.btn_start.setEnabled(True); self.btn_stop.setEnabled(False); self.combo_mode.setEnabled(True)
+        if self.chk_inf_repeat.isChecked():
+            self.current_batch += 1
+            self.total_batches = max(self.total_batches, self.current_batch)
+            self.append_log("[System] Infinite Auto-Repeat is ON. Starting next run in 2 seconds...")
+            QTimer.singleShot(2000, self.run_single_batch)
+        elif self.current_batch < self.total_batches:
+            self.current_batch += 1
+            self.run_single_batch()
         else:
-            self.append_log("\n[Warning] Process exited abnormally or was manually stopped.")
+            self.append_log("\n========== [ All DAQ Sequences Completed ] ==========")
             self.btn_start.setEnabled(True); self.btn_stop.setEnabled(False); self.combo_mode.setEnabled(True)
+
+    def on_run_completed_received(self):
+        if self.daq_process and self.daq_process.isRunning():
+            self.daq_process.stop()
 
     def stop_all(self):
         self.total_batches = 0 
-        self.chk_inf_repeat.setChecked(False) # 정지 버튼 누르면 무한 반복도 강제 취소
+        self.chk_inf_repeat.setChecked(False) 
         if self.daq_process and self.daq_process.isRunning(): self.daq_process.stop()
+
+    def closeEvent(self, event):
+        self.ctrl_receiver.stop()
+        super().closeEvent(event)
