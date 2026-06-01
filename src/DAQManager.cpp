@@ -21,7 +21,8 @@ DAQManager::DAQManager(const std::string &config_file, const std::string &output
     int hwm = 5000;
     zmq_setsockopt(zmq_pub_, ZMQ_SNDHWM, &hwm, sizeof(hwm));
     
-    int linger = 0;
+    // 🌟 [중요 패치] 소켓 소멸 전 버퍼에 남은 데이터를 발송하기 위해 Linger 1초 대기
+    int linger = 1000;
     zmq_setsockopt(zmq_pub_, ZMQ_LINGER, &linger, sizeof(linger));
     
     zmq_bind(zmq_pub_, "tcp://127.0.0.1:5555");
@@ -167,7 +168,7 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
 
         if (max_events_ > 0 && (int)event_count >= max_events_) {
             std::cout << "\n\033[1;33m[System] Event Limit Reached. Stopping...\033[0m" << std::endl;
-            auto_stopped = true; // GUI 스케줄러 자동 반복을 위한 플래그
+            auto_stopped = true; 
             break;
         }
         if (run_time_sec_ > 0) {
@@ -268,6 +269,8 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
                     total_bytes_written += payload_size; 
                 }
                 
+                // 🌟 [중요 패치] ZMQ 멀티파트 분리 (이진 데이터 패킷 전송)
+                zmq_send(zmq_pub_, "DATA", 4, ZMQ_SNDMORE);
                 if (zmq_send(zmq_pub_, raw_buffer_pool_.data(), payload_size, ZMQ_DONTWAIT) < 0) {
                     if (zmq_errno() == EAGAIN) zmq_drops++;
                 }
@@ -303,7 +306,10 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
               << " - Total Data Size : " << std::fixed << std::setprecision(2) << total_mb << " MB\n"
               << "\033[1;32m=========================================\033[0m\n" << std::endl;
 
+    // 🌟 [중요 패치] ZMQ 멀티파트 분리 (제어 패킷 발송 - 데이터 전송과 확실히 분리됨)
     if (auto_stopped) {
-        zmq_send(zmq_pub_, "CTRL:RUN_COMPLETED", 18, ZMQ_DONTWAIT);
+        zmq_send(zmq_pub_, "CTRL", 4, ZMQ_SNDMORE);
+        zmq_send(zmq_pub_, "RUN_COMPLETED", 13, 0); // 0 = ZMQ_DONTWAIT 해제 (도달 보장)
+        std::this_thread::sleep_for(std::chrono::milliseconds(200)); 
     }
 }
