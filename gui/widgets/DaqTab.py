@@ -72,7 +72,6 @@ class DaqTab(QWidget):
         self.base_output_path = ""; self.scan_values = [] 
         self.last_stats = {}; self.current_run_id = -1
         
-        # 🌟 자가 치유(Self-Healing) 상태 관리를 위한 플래그
         self.is_recovering = False
         
         self.setup_ui()
@@ -83,7 +82,6 @@ class DaqTab(QWidget):
         self.disk_timer.start(1000)
         self.update_disk_space()
 
-        # 🌟 [워치독 타이머 추가] 30초 무응답 시 자동 복구 루틴 가동
         self.watchdog_timer = QTimer(self)
         self.watchdog_timer.timeout.connect(self.trigger_watchdog_recovery)
 
@@ -261,7 +259,6 @@ class DaqTab(QWidget):
         drops = int(stats.get('drops', '0'))
         self.val_drops.setStyleSheet(self.val_style_warn if drops > 0 else self.val_style); self.val_drops.setText(str(drops))
         
-        # 🌟 C++가 살아있음을 파이썬에 신고 (Pet the dog)
         if self.watchdog_timer.isActive():
             self.watchdog_timer.start(30000)
 
@@ -271,6 +268,12 @@ class DaqTab(QWidget):
             self.last_stats['board_temp'] = temp
             self.val_board_temp.setStyleSheet(self.val_style_warn if temp > 65 else self.val_style)
             self.val_board_temp.setText(f"{temp} °C")
+            
+        # 🌟 C++가 연산하여 던진 Live-Time 및 Dead-time 정보를 메모리에 적재
+        if "live_time" in data:
+            self.last_stats['live_time'] = data['live_time']
+            self.last_stats['elapsed_time'] = data['elapsed_time']
+            self.last_stats['dead_time_pct'] = data['dead_time_pct']
 
     def start_daq_sequence(self):
         self.save_settings()
@@ -359,10 +362,8 @@ class DaqTab(QWidget):
         self.daq_process.finished_signal.connect(self.on_batch_finished)
         self.daq_process.start()
         
-        # 🌟 C++ 프로세스 시작과 동시에 30초 시한폭탄 가동
         self.watchdog_timer.start(30000)
 
-    # 🌟 자가 치유(Self-Healing) 트리거 함수
     def trigger_watchdog_recovery(self):
         self.watchdog_timer.stop()
         self.is_recovering = True 
@@ -370,10 +371,10 @@ class DaqTab(QWidget):
         
         if self.daq_process and self.daq_process.isRunning():
             self.append_log("[System] Sending SIGKILL to zombie DAQ process...")
-            self.daq_process.stop() # OS 레벨에서 강제 사살 (on_batch_finished 트리거됨)
+            self.daq_process.stop() 
 
     def on_batch_finished(self, returncode):
-        self.watchdog_timer.stop() # 프로세스 종료 시 알람 정지
+        self.watchdog_timer.stop() 
         self.append_log(f">>> Process Exited (Code: {returncode})")
         
         if self.current_run_id > 0 and self.last_stats:
@@ -394,7 +395,6 @@ class DaqTab(QWidget):
                 self.btn_start.setEnabled(True); self.btn_stop.setEnabled(False); self.combo_mode.setEnabled(True)
         else:
             self.append_log("\n[Warning] Process exited abnormally or was manually stopped.")
-            # 🌟 워치독이 발동한 경우 UI를 죽이지 않고 부활 루틴으로 연계
             if self.is_recovering:
                 if self.current_run_id > 0:
                     self.db.update_run_status("ZOMBIE_KILLED")
@@ -402,7 +402,7 @@ class DaqTab(QWidget):
                     self.append_log("<span style='color:#198754; font-weight:bold;'>[System] Self-Healing Initiated. Auto-restarting in 5 seconds to clear USB buffer...</span><br>")
                     self.current_batch += 1
                     self.total_batches = max(self.total_batches, self.current_batch)
-                    QTimer.singleShot(5000, self.run_single_batch) # USB/VME 클리어 대기시간 5초
+                    QTimer.singleShot(5000, self.run_single_batch) 
                 else:
                     self.btn_start.setEnabled(True); self.btn_stop.setEnabled(False); self.combo_mode.setEnabled(True)
             else:
