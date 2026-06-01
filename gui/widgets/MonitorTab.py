@@ -34,7 +34,8 @@ class MonitorTab(QWidget):
         self.sock = self.ctx.socket(zmq.SUB)
         self.sock.setsockopt(zmq.RCVHWM, 2000) 
         self.sock.connect("tcp://127.0.0.1:5555")
-        self.sock.setsockopt_string(zmq.SUBSCRIBE, "")
+        # 🌟 [패치] 오직 "DATA" 토픽이 붙은 멀티파트 메시지만 수신하여 구조체 붕괴 차단
+        self.sock.setsockopt_string(zmq.SUBSCRIBE, "DATA")
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -114,7 +115,7 @@ class MonitorTab(QWidget):
         else:
             self.timer.stop()
             while True:
-                try: self.sock.recv(flags=zmq.NOBLOCK)
+                try: self.sock.recv_multipart(flags=zmq.NOBLOCK)
                 except zmq.Again: break
 
     def clear_data(self):
@@ -127,31 +128,34 @@ class MonitorTab(QWidget):
         latest_msg = None
         while True:
             try:
-                msg = self.sock.recv(flags=zmq.NOBLOCK)
-                latest_msg = msg
-                
-                header = struct.unpack(HEADER_FORMAT, msg[:HEADER_SIZE])
-                record_len = int(header[2])
-                mask = int(header[3])
-                
-                if mask != self.current_mask:
-                    self.current_mask = mask
-                    self.rebuild_plots(mask)
+                # 🌟 [패치] 멀티파트 수신 적용. 첫 프레임이 b"DATA" 일때만 두 번째 프레임을 페이로드로 사용
+                frames = self.sock.recv_multipart(flags=zmq.NOBLOCK)
+                if len(frames) == 2 and frames[0] == b"DATA":
+                    msg = frames[1]
+                    latest_msg = msg
                     
-                active_channels = [i for i in range(4) if (mask >> i) & 1]
-                
-                for idx, ch in enumerate(active_channels):
-                    offset = HEADER_SIZE + (idx * record_len * 2)
-                    wave_bytes = msg[offset : offset + (record_len * 2)]
+                    header = struct.unpack(HEADER_FORMAT, msg[:HEADER_SIZE])
+                    record_len = int(header[2])
+                    mask = int(header[3])
                     
-                    if wave_bytes:
-                        wave_arr = np.frombuffer(wave_bytes, dtype=np.uint16)
-                        if len(wave_arr) > 200:
-                            baseline_end = min(150, record_len // 4)
-                            baseline = np.mean(wave_arr[:baseline_end])
-                            pulse_area = np.sum(baseline - wave_arr[baseline_end:]) 
-                            if pulse_area > 0: 
-                                self.q_long_hists[ch].append(pulse_area)
+                    if mask != self.current_mask:
+                        self.current_mask = mask
+                        self.rebuild_plots(mask)
+                        
+                    active_channels = [i for i in range(4) if (mask >> i) & 1]
+                    
+                    for idx, ch in enumerate(active_channels):
+                        offset = HEADER_SIZE + (idx * record_len * 2)
+                        wave_bytes = msg[offset : offset + (record_len * 2)]
+                        
+                        if wave_bytes:
+                            wave_arr = np.frombuffer(wave_bytes, dtype=np.uint16)
+                            if len(wave_arr) > 200:
+                                baseline_end = min(150, record_len // 4)
+                                baseline = np.mean(wave_arr[:baseline_end])
+                                pulse_area = np.sum(baseline - wave_arr[baseline_end:]) 
+                                if pulse_area > 0: 
+                                    self.q_long_hists[ch].append(pulse_area)
             except zmq.Again: 
                 break
 
