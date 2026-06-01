@@ -3,7 +3,7 @@ import shutil
 import configparser
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, 
                              QPushButton, QLineEdit, QLabel, QTextEdit, 
-                             QGroupBox, QSpinBox, QComboBox, QFileDialog)
+                             QGroupBox, QSpinBox, QComboBox, QFileDialog, QCheckBox)
 from PyQt5.QtGui import QFont, QTextCursor
 from PyQt5.QtCore import QTimer, QSettings
 from core.ProcessManager import ProcessManager
@@ -87,6 +87,12 @@ class DaqTab(QWidget):
         self.lbl_batch = QLabel("Batches:")
         self.spin_batch = QSpinBox(); self.spin_batch.setRange(2, 999); self.spin_batch.setEnabled(False)
         cond_layout1.addWidget(self.lbl_batch); cond_layout1.addWidget(self.spin_batch)
+        
+        # 🌟 [패치] 무한 자동 반복 토글 추가 (24시간 무인 동작용)
+        self.chk_inf_repeat = QCheckBox("∞ Infinite Auto-Repeat")
+        self.chk_inf_repeat.setStyleSheet("font-weight: bold; color: #198754;")
+        cond_layout1.addWidget(self.chk_inf_repeat)
+        
         cond_main_layout.addLayout(cond_layout1)
         
         self.scan_layout = QHBoxLayout()
@@ -216,13 +222,19 @@ class DaqTab(QWidget):
 
     def run_single_batch(self):
         self.last_stats = {}
-        self.val_batch.setText(f"{self.current_batch} / {self.total_batches}")
+        
+        # 🌟 무한 루프 모드일 경우 총 배치 수를 가변적으로 표시
+        if self.chk_inf_repeat.isChecked():
+            self.val_batch.setText(f"{self.current_batch} / ∞")
+        else:
+            self.val_batch.setText(f"{self.current_batch} / {self.total_batches}")
         
         output_file = self.base_output_path
         name, ext = os.path.splitext(self.base_output_path)
         mode = self.combo_mode.currentIndex()
         
-        if mode == 1: output_file = f"{name}_part{self.current_batch:02d}{ext}"
+        if mode == 1 or self.chk_inf_repeat.isChecked(): 
+            output_file = f"{name}_part{self.current_batch:04d}{ext}"
         elif mode == 2:
             current_th = self.scan_values[self.current_batch - 1]
             output_file = f"{name}_th{current_th}{ext}"
@@ -239,7 +251,6 @@ class DaqTab(QWidget):
         config.set("Environment", "AppliedHV", self.hv_input.text().strip())
         config.set("Environment", "Temperature", self.temp_input.text().strip())
         
-        # 🌟 핵심 리팩토링: 오토 스캔 모드 시 활성화된 '모든 채널'을 파악해 일괄 적용
         if mode == 2:
             try:
                 mask = int(config.get("Digitizer", "ChannelMask", fallback="1"))
@@ -264,7 +275,7 @@ class DaqTab(QWidget):
         if self.env_data_provider: current_env_data.update(self.env_data_provider())
 
         self.current_run_id = self.db.record_run_start(output_file, current_env_data, config_full)
-        self.append_log(f"\n========== [ Batch/Scan {self.current_batch}/{self.total_batches} Started ] ==========")
+        self.append_log(f"\n========== [ Batch/Scan {self.current_batch} Started ] ==========")
         self.append_log(f"--- Output: {output_file} | DB ID: {self.current_run_id} ---")
         
         exe_path = os.path.join(self.bin_dir, "frontend_dt5751")
@@ -287,13 +298,24 @@ class DaqTab(QWidget):
             self.db.update_daq_summary(self.current_run_id, self.last_stats)
             self.append_log("[DB] DAQ Summary successfully pushed to database.")
 
-        if self.current_batch < self.total_batches and returncode == 0:
-            self.current_batch += 1
-            self.run_single_batch()
+        # 🌟 [패치] 프로세스가 목표(Event/Time Limit) 달성으로 정상 종료(0) 되었을 때, 무한 재시작 처리
+        if returncode == 0:
+            if self.chk_inf_repeat.isChecked():
+                self.current_batch += 1
+                self.total_batches = max(self.total_batches, self.current_batch)
+                self.append_log("[System] Infinite Auto-Repeat is ON. Starting next run in 2 seconds...")
+                QTimer.singleShot(2000, self.run_single_batch) # 파일 닫힘 대기용 2초 딜레이
+            elif self.current_batch < self.total_batches:
+                self.current_batch += 1
+                self.run_single_batch()
+            else:
+                self.append_log("\n========== [ All DAQ Sequences Completed ] ==========")
+                self.btn_start.setEnabled(True); self.btn_stop.setEnabled(False); self.combo_mode.setEnabled(True)
         else:
-            self.append_log("\n========== [ All DAQ Sequences Completed ] ==========")
+            self.append_log("\n[Warning] Process exited abnormally or was manually stopped.")
             self.btn_start.setEnabled(True); self.btn_stop.setEnabled(False); self.combo_mode.setEnabled(True)
 
     def stop_all(self):
         self.total_batches = 0 
+        self.chk_inf_repeat.setChecked(False) # 정지 버튼 누르면 무한 반복도 강제 취소
         if self.daq_process and self.daq_process.isRunning(): self.daq_process.stop()
