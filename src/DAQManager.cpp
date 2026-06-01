@@ -9,6 +9,7 @@
 #include <thread>
 #include <zmq.h>
 #include <filesystem>
+#include <string>
 
 DAQManager::DAQManager(const std::string &config_file, const std::string &output_file,
                        int max_events, int run_time_sec)
@@ -21,7 +22,6 @@ DAQManager::DAQManager(const std::string &config_file, const std::string &output
     int hwm = 5000;
     zmq_setsockopt(zmq_pub_, ZMQ_SNDHWM, &hwm, sizeof(hwm));
     
-    // 🌟 [중요 패치] 소켓 소멸 전 버퍼에 남은 데이터를 발송하기 위해 Linger 1초 대기
     int linger = 1000;
     zmq_setsockopt(zmq_pub_, ZMQ_LINGER, &linger, sizeof(linger));
     
@@ -35,7 +35,7 @@ DAQManager::DAQManager(const std::string &config_file, const std::string &output
         
         out_stream_.open(output_file_, std::ios::out | std::ios::binary);
         if (!out_stream_.is_open()) {
-            std::cerr << "\n\033[1;31m[Fatal Error]\033[0m Cannot open output file: " << output_file_ << "\n";
+            std::cerr << "\n[Fatal Error] Cannot open output file: " << output_file_ << "\n";
             throw std::runtime_error("File permission denied or invalid path.");
         }
     }
@@ -53,7 +53,7 @@ DAQManager::~DAQManager() {
 }
 
 void DAQManager::SetupHardware() {
-    std::cout << "\033[1;36m[DAQManager]\033[0m Configuring DT5751 Hardware from Config...\n";
+    std::cout << "[DAQManager] Configuring DT5751 Hardware from Config...\n";
     int handle = digitizer_.GetHandle();
     
     int des_mode = config_.GetInt("Digitizer", "EnableDESMode", 0);
@@ -96,7 +96,7 @@ void DAQManager::SetupHardware() {
             uint32_t thr = config_.GetInt(ch_sec, "TriggerThreshold", master_thr);
             
             if (thr > 1023) {
-                std::cerr << "\033[1;33m[Warning] CH" << ch << " Threshold (" << thr << ") exceeds 10-bit limit. Forced to 1023.\033[0m\n";
+                std::cerr << "[Warning] CH" << ch << " Threshold (" << thr << ") exceeds 10-bit limit. Forced to 1023.\n";
                 thr = 1023;
             }
             CAEN_CHECK(CAEN_DGTZ_SetChannelDCOffset(handle, ch, offset));
@@ -161,19 +161,19 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
     const uint32_t NEVENTS_LEFT = 10;
     bool auto_stopped = false;
 
-    std::cout << "\n\033[1;32m[DAQ Started]\033[0m Press Ctrl+C to stop gracefully." << std::endl;
+    std::cout << "\n[DAQ Started] Press Ctrl+C to stop gracefully." << std::endl;
 
     while (is_running) {
         auto now = std::chrono::steady_clock::now();
 
         if (max_events_ > 0 && (int)event_count >= max_events_) {
-            std::cout << "\n\033[1;33m[System] Event Limit Reached. Stopping...\033[0m" << std::endl;
+            std::cout << "\n[System] Event Limit Reached. Stopping..." << std::endl;
             auto_stopped = true; 
             break;
         }
         if (run_time_sec_ > 0) {
             if (std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count() >= run_time_sec_) {
-                std::cout << "\n\033[1;33m[System] Time Limit Reached. Stopping...\033[0m" << std::endl;
+                std::cout << "\n[System] Time Limit Reached. Stopping..." << std::endl;
                 auto_stopped = true;
                 break;
             }
@@ -188,13 +188,18 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
             auto total_sec = std::chrono::duration_cast<std::chrono::seconds>(now - start_time).count();
             int mins = total_sec / 60;
             int secs = total_sec % 60;
+
+            // 하드웨어 온도 폴링 처리 (1초 간격)
+            uint32_t board_temp = 0;
+            CAEN_DGTZ_ReadTemperature(handle, 0, &board_temp);
             
             std::cout << "[DAQ] "
                       << std::setfill('0') << std::setw(2) << mins << ":" << std::setw(2) << secs << " | "
                       << "Evt: " << event_count << " | "
                       << std::fixed << std::setprecision(1) << rate << " Hz | "
                       << std::fixed << std::setprecision(1) << speed_mbps << " MB/s | "
-                      << "Drop: " << zmq_drops << std::endl;
+                      << "Drop: " << zmq_drops << " | "
+                      << "Temp: " << board_temp << " C" << std::endl;
             
             log_events = 0;
             zmq_drops = 0;
@@ -203,6 +208,11 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
             if (out_stream_.is_open()) {
                 out_stream_.flush();
             }
+
+            // STAT 멀티파트 메시지로 텔레메트리 데이터 전송
+            std::string stat_payload = "{\"temp\":" + std::to_string(board_temp) + "}";
+            zmq_send(zmq_pub_, "STAT", 4, ZMQ_SNDMORE);
+            zmq_send(zmq_pub_, stat_payload.c_str(), stat_payload.size(), ZMQ_DONTWAIT);
         }
 
         if (always_triggered > 0) {
@@ -269,7 +279,6 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
                     total_bytes_written += payload_size; 
                 }
                 
-                // 🌟 [중요 패치] ZMQ 멀티파트 분리 (이진 데이터 패킷 전송)
                 zmq_send(zmq_pub_, "DATA", 4, ZMQ_SNDMORE);
                 if (zmq_send(zmq_pub_, raw_buffer_pool_.data(), payload_size, ZMQ_DONTWAIT) < 0) {
                     if (zmq_errno() == EAGAIN) zmq_drops++;
@@ -296,7 +305,7 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
     double total_mb = total_bytes_written / (1024.0 * 1024.0);
     double avg_rate = (run_duration > 0) ? static_cast<double>(event_count) / run_duration : 0.0;
 
-    std::cout << "\n\n\033[1;32m========== [ DAQ Run Summary ] ==========\033[0m\n"
+    std::cout << "\n\n========== [ DAQ Run Summary ] ==========\n"
               << " - Output File     : " << output_file_ << "\n"
               << " - Start Time      : " << start_str << "\n"
               << " - End Time        : " << end_str << "\n"
@@ -304,12 +313,11 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
               << " - Total Events    : " << event_count << " events\n"
               << " - Avg Trg Rate    : " << std::fixed << std::setprecision(1) << avg_rate << " Hz\n"
               << " - Total Data Size : " << std::fixed << std::setprecision(2) << total_mb << " MB\n"
-              << "\033[1;32m=========================================\033[0m\n" << std::endl;
+              << "=========================================\n" << std::endl;
 
-    // 🌟 [중요 패치] ZMQ 멀티파트 분리 (제어 패킷 발송 - 데이터 전송과 확실히 분리됨)
     if (auto_stopped) {
         zmq_send(zmq_pub_, "CTRL", 4, ZMQ_SNDMORE);
-        zmq_send(zmq_pub_, "RUN_COMPLETED", 13, 0); // 0 = ZMQ_DONTWAIT 해제 (도달 보장)
+        zmq_send(zmq_pub_, "RUN_COMPLETED", 13, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(200)); 
     }
 }
