@@ -10,6 +10,15 @@ class DatabaseManager:
     def _init_db(self):
         with sqlite3.connect(self.db_path) as conn:
             c = conn.cursor()
+            
+            # 🌟 [패치] 구형 DB 스키마(run_id 없음) 감지 시 백업 테이블로 밀어내고 새로 만듦
+            c.execute("PRAGMA table_info(run_history)")
+            columns = [info[1] for info in c.fetchall()]
+            if columns and "run_id" not in columns:
+                c.execute("ALTER TABLE run_history RENAME TO run_history_legacy_backup")
+                conn.commit()
+
+            # 최신 프로덕션 등급 스키마 창설
             c.execute('''CREATE TABLE IF NOT EXISTS run_history (
                             id INTEGER PRIMARY KEY AUTOINCREMENT,
                             run_id TEXT UNIQUE,
@@ -23,15 +32,10 @@ class DatabaseManager:
                             total_events INTEGER,
                             avg_rate_hz REAL,
                             total_size_mb REAL,
-                            status TEXT
+                            status TEXT,
+                            live_time_sec REAL,
+                            dead_time_pct REAL
                         )''')
-            
-            # 기존 DB 구조를 파괴하지 않고 하위 호환성을 유지하기 위한 마이그레이션
-            try:
-                c.execute("ALTER TABLE run_history ADD COLUMN live_time_sec REAL")
-                c.execute("ALTER TABLE run_history ADD COLUMN dead_time_pct REAL")
-            except sqlite3.OperationalError:
-                pass 
             conn.commit()
 
     def record_run_start(self, output_file, env_data, config_file):
@@ -72,7 +76,6 @@ class DatabaseManager:
             rate = float(rate_str) if rate_str else 0.0
             speed = float(speed_str) if speed_str else 0.0
             
-            # C++에서 전송된 TTT 기반 절대 선속 데이터를 DB로 직접 밀어넣음
             live_time = float(stats.get('live_time', 0.0))
             dead_time_pct = float(stats.get('dead_time_pct', 0.0))
 
