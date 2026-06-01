@@ -91,12 +91,11 @@ void DAQManager::SetupHardware() {
     for (int ch = 0; ch < MAX_DT5751_CH; ++ch) {
         if ((channel_mask >> ch) & 1) {
             std::string ch_sec = "Channel_" + std::to_string(ch);
-            
             uint32_t offset = config_.GetInt(ch_sec, "DCOffset", master_offset); 
             uint32_t thr = config_.GetInt(ch_sec, "TriggerThreshold", master_thr);
             
             if (thr > 1023) {
-                std::cerr << "[Warning] CH" << ch << " Threshold (" << thr << ") exceeds 10-bit limit. Forced to 1023.\n";
+                std::cerr << "[Warning] CH" << ch << " Threshold exceeds 10-bit limit. Forced to 1023.\n";
                 thr = 1023;
             }
             CAEN_CHECK(CAEN_DGTZ_SetChannelDCOffset(handle, ch, offset));
@@ -148,6 +147,12 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
     uint64_t ttt_rollovers = 0;
     const uint32_t TTT_MASK = 0x7FFFFFFF;
 
+    // 라이브 타임 측정을 위한 TTT 역산 변수 (DT5751 TTT 해상도는 8 ns)
+    uint64_t first_ttt_val = 0;
+    uint64_t last_ttt_val = 0;
+    bool is_first_event = true;
+    const double TTT_RESOLUTION_NS = 8.0;
+
     auto start_wall = std::chrono::system_clock::now();
     auto start_time = std::chrono::steady_clock::now();
     auto last_log_time = start_time;
@@ -189,7 +194,6 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
             int mins = total_sec / 60;
             int secs = total_sec % 60;
 
-            // 하드웨어 온도 폴링 처리 (1초 간격)
             uint32_t board_temp = 0;
             CAEN_DGTZ_ReadTemperature(handle, 0, &board_temp);
             
@@ -209,7 +213,6 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
                 out_stream_.flush();
             }
 
-            // STAT 멀티파트 메시지로 텔레메트리 데이터 전송
             std::string stat_payload = "{\"temp\":" + std::to_string(board_temp) + "}";
             zmq_send(zmq_pub_, "STAT", 4, ZMQ_SNDMORE);
             zmq_send(zmq_pub_, stat_payload.c_str(), stat_payload.size(), ZMQ_DONTWAIT);
@@ -261,6 +264,13 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
                 header->Pattern = evt_info.Pattern;
                 header->SampleRate_ps = current_sample_rate_ps_;
 
+                // 라이브 타임 계산을 위한 TTT 추적 로직
+                if (is_first_event) {
+                    first_ttt_val = header->ExtendedTTT;
+                    is_first_event = false;
+                }
+                last_ttt_val = header->ExtendedTTT;
+
                 size_t payload_size = sizeof(EventHeader);
                 for (int ch = 0; ch < MAX_DT5751_CH; ++ch) {
                     if ((header->ChannelMask >> ch) & 1) {
@@ -295,25 +305,45 @@ void DAQManager::AcquisitionLoop(std::atomic<bool>& is_running) {
     CAEN_DGTZ_SWStopAcquisition(handle);
 
     auto end_wall = std::chrono::system_clock::now();
+    std::chrono::duration<double> wall_clock_duration = end_wall - start_wall;
+    double run_duration_sec = wall_clock_duration.count();
+
+    // 제1원리적 데드타임 연산 수행
+    double live_time_sec = (last_ttt_val - first_ttt_val) * TTT_RESOLUTION_NS * 1e-9;
+    double dead_time_pct = 0.0;
+    
+    if (run_duration_sec > 0.0 && live_time_sec > 0.0) {
+        dead_time_pct = (1.0 - (live_time_sec / run_duration_sec)) * 100.0;
+        if (dead_time_pct < 0.0) dead_time_pct = 0.0; // 강제 클리핑
+    }
+
+    double total_mb = total_bytes_written / (1024.0 * 1024.0);
+    double avg_rate = (live_time_sec > 0) ? static_cast<double>(event_count) / live_time_sec : 0.0;
+
     std::time_t start_t = std::chrono::system_clock::to_time_t(start_wall);
     std::time_t end_t = std::chrono::system_clock::to_time_t(end_wall);
     char start_str[64], end_str[64];
     std::strftime(start_str, sizeof(start_str), "%Y-%m-%d %H:%M:%S", std::localtime(&start_t));
     std::strftime(end_str, sizeof(end_str), "%Y-%m-%d %H:%M:%S", std::localtime(&end_t));
 
-    auto run_duration = std::chrono::duration_cast<std::chrono::seconds>(end_wall - start_wall).count();
-    double total_mb = total_bytes_written / (1024.0 * 1024.0);
-    double avg_rate = (run_duration > 0) ? static_cast<double>(event_count) / run_duration : 0.0;
-
     std::cout << "\n\n========== [ DAQ Run Summary ] ==========\n"
               << " - Output File     : " << output_file_ << "\n"
               << " - Start Time      : " << start_str << "\n"
               << " - End Time        : " << end_str << "\n"
-              << " - Elapsed Time    : " << run_duration << " seconds\n"
+              << " - Wall-clock Time : " << std::fixed << std::setprecision(2) << run_duration_sec << " seconds\n"
+              << " - Live-Time       : " << std::fixed << std::setprecision(2) << live_time_sec << " seconds\n"
+              << " - Dead-Time Frac. : " << std::fixed << std::setprecision(4) << dead_time_pct << " %\n"
               << " - Total Events    : " << event_count << " events\n"
-              << " - Avg Trg Rate    : " << std::fixed << std::setprecision(1) << avg_rate << " Hz\n"
+              << " - Live Trg Rate   : " << std::fixed << std::setprecision(1) << avg_rate << " Hz\n"
               << " - Total Data Size : " << std::fixed << std::setprecision(2) << total_mb << " MB\n"
               << "=========================================\n" << std::endl;
+
+    // 파이썬 DB 관제탑으로 최종 물리량(Live Time 등) 전송
+    std::string final_stat = "{\"live_time\":" + std::to_string(live_time_sec) + 
+                             ",\"elapsed_time\":" + std::to_string(run_duration_sec) + 
+                             ",\"dead_time_pct\":" + std::to_string(dead_time_pct) + "}";
+    zmq_send(zmq_pub_, "STAT", 4, ZMQ_SNDMORE);
+    zmq_send(zmq_pub_, final_stat.c_str(), final_stat.size(), 0);
 
     if (auto_stopped) {
         zmq_send(zmq_pub_, "CTRL", 4, ZMQ_SNDMORE);
